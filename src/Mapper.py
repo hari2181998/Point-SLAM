@@ -23,6 +23,9 @@ from skimage.color import rgb2gray
 from skimage import filters
 from scipy.interpolate import interp1d
 from pytorch_msssim import ms_ssim
+from copy import deepcopy
+from torch.autograd import Variable as V
+
 
 import wandb
 
@@ -52,6 +55,7 @@ class Mapper(object):
         self.exposure_feat_shared = slam.exposure_feat
         self.exposure_feat = self.exposure_feat_shared[0].clone(
         ).requires_grad_()
+
 
         self.wandb = cfg['wandb']
         self.gt_camera = cfg['tracking']['gt_camera']
@@ -113,6 +117,9 @@ class Mapper(object):
         self.H, self.W, self.fx, self.fy, self.cx, self.cy = slam.H, slam.W, slam.fx, slam.fy, slam.cx, slam.cy
         self.npc_geo_feats = None
         self.npc_col_feats = None
+
+        # Changes for deform points
+        self.deform_points = slam.deform_points
 
     def set_pipe(self, pipe):
         self.pipe = pipe
@@ -314,8 +321,13 @@ class Mapper(object):
 
         if not color_refine:
             frame_pts_add = 0
-            _ = self.npc.add_neural_points(batch_rays_o, batch_rays_d, batch_gt_depth, batch_gt_color,
-                                           dynamic_radius=self.dynamic_r_add[j, i] if self.use_dynamic_radius else None)
+            if self.deform_points:
+                _ = self.npc.add_neural_points(batch_rays_o, batch_rays_d, batch_gt_depth, batch_gt_color,
+                                               dynamic_radius=self.dynamic_r_add[j, i] if self.use_dynamic_radius else None,
+                                               last_keyframe_idx=idx, last_keyframe_c2w=cur_c2w.detach().clone())
+            else:
+                _ = self.npc.add_neural_points(batch_rays_o, batch_rays_d, batch_gt_depth, batch_gt_color,
+                                            dynamic_radius=self.dynamic_r_add[j, i] if self.use_dynamic_radius else None)
             print(f'{_} locations to add points.')
             frame_pts_add += _
 
@@ -325,8 +337,14 @@ class Mapper(object):
                     0, H, 0, W, self.pixels_based_on_color_grad,
                     H, W, fx, fy, cx, cy, cur_c2w, gt_depth, gt_color, self.device,
                     depth_filter=True, return_index=True)
-                _ = self.npc.add_neural_points(batch_rays_o, batch_rays_d, batch_gt_depth, batch_gt_color,
-                                               is_pts_grad=True, dynamic_radius=self.dynamic_r_add[j, i] if self.use_dynamic_radius else None)
+                if self.deform_points:
+                    _ = self.npc.add_neural_points(batch_rays_o, batch_rays_d, batch_gt_depth, batch_gt_color,
+                                                is_pts_grad=True, dynamic_radius=self.dynamic_r_add[j, i] if self.use_dynamic_radius else None,
+                                                last_keyframe_idx=idx, last_keyframe_c2w=cur_c2w.detach().clone())
+                
+                else:
+                    _ = self.npc.add_neural_points(batch_rays_o, batch_rays_d, batch_gt_depth, batch_gt_color,
+                                                is_pts_grad=True, dynamic_radius=self.dynamic_r_add[j, i] if self.use_dynamic_radius else None)
                 print(f'{_} locations to add points based on pixel gradients.')
                 frame_pts_add += _
 
@@ -335,6 +353,13 @@ class Mapper(object):
         npc_col_feats = self.npc.get_col_feats()
         self.cloud_pos_tensor = torch.tensor(
             self.npc.cloud_pos(), device=self.device)
+        if self.deform_points:
+            self.cloud_pos_in_last_keyframe_tensor = torch.tensor(self.npc.pos_in_last_keyframe(), device=self.device)
+            self.last_keyframe_idx_tensor = torch.tensor(self.npc.last_keyframe_for_pts(), device=self.device)
+        else:
+            self.cloud_pos_in_last_keyframe_tensor = None
+            self.last_keyframe_idx_tensor = None
+
         if self.encode_exposure:
             self.exposure_feat = self.exposure_feat_shared[0].clone(
             ).requires_grad_()
@@ -390,6 +415,10 @@ class Mapper(object):
                     camera_tensor_list.append(camera_tensor)
                     gt_camera_tensor = get_tensor_from_camera(gt_c2w)
                     gt_camera_tensor_list.append(gt_camera_tensor)
+        
+        # # Debugging 
+        # for i in range(len(camera_tensor_list)):
+        #     camera_tensor_list[i].register_hook(lambda x: print("grad has been changed for camera tensor %d" % i))
 
         optim_para_list = [{'params': decoders_para_list, 'lr': 0},
                            {'params': geo_pcl_para, 'lr': 0},
@@ -404,6 +433,18 @@ class Mapper(object):
         if idx > 0 and not color_refine:
             num_joint_iters = np.clip(int(num_joint_iters*frame_pts_add/300), int(
                 self.min_iter_ratio*num_joint_iters), 2*num_joint_iters)
+        
+        # ba_c2w_list = None
+        # non_ba_c2w_list = None
+        # if self.deform_points and self.BA:
+        #     ba_c2w_list = torch.tensor(self.estimate_c2w_list, device=device)
+        
+        estimate_c2w_list = self.estimate_c2w_list.clone().to(device)
+        estimate_c2w_list.requires_grad = False
+        # ba_c2w_list = estimate_c2w_list.clone()
+
+        #debugging 
+        grad_through_camera_tensors = []
 
         for joint_iter in range(num_joint_iters):
             tic = time.perf_counter()
@@ -445,6 +486,7 @@ class Mapper(object):
                                     exposure_feat=self.exposure_feat)
 
             optimizer.zero_grad()
+            # ba_c2w_list.grad = None
             batch_rays_d_list = []
             batch_rays_o_list = []
             batch_gt_depth_list = []
@@ -455,6 +497,7 @@ class Mapper(object):
             # match with the per frame exposure feature
 
             camera_tensor_id = 0
+            ba_c2w_list = V(estimate_c2w_list)
             for frame in optimize_frame:
                 if frame != -1:
                     gt_depth = keyframe_dict[frame]['depth'].to(device)
@@ -463,6 +506,7 @@ class Mapper(object):
                         camera_tensor = camera_tensor_list[camera_tensor_id]
                         camera_tensor_id += 1
                         c2w = get_camera_from_tensor(camera_tensor)
+                        ba_c2w_list[keyframe_dict[frame]['idx']] = torch.cat([get_camera_from_tensor(camera_tensor), bottom], dim=0)
                     else:
                         c2w = keyframe_dict[frame]['est_c2w']
 
@@ -472,6 +516,7 @@ class Mapper(object):
                     if self.BA:
                         camera_tensor = camera_tensor_list[camera_tensor_id]
                         c2w = get_camera_from_tensor(camera_tensor)
+                        ba_c2w_list[idx] = torch.cat([get_camera_from_tensor(camera_tensor), bottom], dim=0)
                     else:
                         c2w = cur_c2w
 
@@ -512,13 +557,21 @@ class Mapper(object):
             batch_gt_depth, batch_gt_color = batch_gt_depth[inside_mask], batch_gt_color[inside_mask]
             if self.use_dynamic_radius:
                 r_query_list = r_query_list[inside_mask]
+            
+            
+
+
             ret = self.renderer.render_batch_ray(npc, self.decoders, batch_rays_d, batch_rays_o, device, self.stage,
                                                  gt_depth=batch_gt_depth, npc_geo_feats=npc_geo_feats,
                                                  npc_col_feats=npc_col_feats,
                                                  is_tracker=True if self.BA else False,
                                                  cloud_pos=self.cloud_pos_tensor,
                                                  dynamic_r_query=r_query_list,
-                                                 exposure_feat=None)
+                                                 exposure_feat=None,
+                                                 last_key_frame_pos = self.cloud_pos_in_last_keyframe_tensor,
+                                                 last_key_frame_idx = self.last_keyframe_idx_tensor,
+                                                 c2w_list = ba_c2w_list if self.BA else None)
+                
             depth, uncertainty, color, valid_ray_mask = ret
 
             depth_mask = (batch_gt_depth > 0) & valid_ray_mask
@@ -553,8 +606,15 @@ class Mapper(object):
                 loss += weighted_color_loss
 
             loss.backward(retain_graph=False)
+            if self.BA:
+                camera_tensor_grad = 0
+                for camera_tensor in camera_tensor_list:
+                    camera_tensor_grad += camera_tensor.grad.norm()
+                camera_tensor_grad /= len(camera_tensor_list)
+                wandb.log({'camera_tensor_grad': camera_tensor_grad.item()})
             optimizer.step()
             optimizer.zero_grad()
+            ba_c2w_list.grad = None
 
             # put selected and updated params back to npc
             if self.frustum_feature_selection:
@@ -633,6 +693,21 @@ class Mapper(object):
             self.exposure_feat_all.append(self.exposure_feat.detach().cpu())
             torch.save(self.decoders.color_decoder.state_dict(),
                        f'{self.output}/ckpts/color_decoder/{idx:05}.pt')
+            
+        ##TODO Update the point global positions based on the optimized R,t and update the faiss index
+        if self.deform_points and self.BA:
+            final_indices = []
+            for frame in optimize_frame:
+                if frame != oldest_frame:
+                    if frame != -1:
+                        indices = self.npc.update_global_pos_for_keyframe(frame, keyframe_dict[frame]['est_c2w'].detach().clone())
+                    else:
+                        indices = self.npc.update_global_pos_for_keyframe(idx, cur_c2w.detach().clone())
+                    final_indices += indices.tolist()
+                    
+                    
+            self.npc.update_faiss_index(final_indices)
+            print('Mapper has updated point global positions and faiss index.')
 
         if self.BA:
             return cur_c2w
@@ -643,14 +718,15 @@ class Mapper(object):
         cfg = self.cfg
         setup_seed(cfg["setup_seed"])
         scene_name = cfg["scene"]
+        deform_points = cfg["deform_points"]
 
         if self.use_dynamic_radius:
             os.makedirs(f'{self.output}/dynamic_r_frame', exist_ok=True)
         if self.encode_exposure:
             os.makedirs(f"{self.output}/ckpts/color_decoder", exist_ok=True)
         if self.wandb:
-            wandb.init(config=cfg, project=self.project_name, group=f'slam_{scene_name}',
-                       name='mapper_'+time_string,
+            wandb.init(config=cfg, project=self.project_name, group=f'slam_{scene_name}_{deform_points}',
+                       name='mapper_'+time_string+ '_'+str(deform_points),
                        settings=wandb.Settings(code_dir="."), dir=self.cfg["wandb_folder"],
                        tags=[scene_name])
             wandb.run.log_code(".")
@@ -730,7 +806,7 @@ class Mapper(object):
             for outer_joint_iter in range(outer_joint_iters):
                 # start BA when having enough keyframes
                 self.BA = (len(self.keyframe_list) >
-                           4) and cfg['mapping']['BA']
+                           1) and cfg['mapping']['BA']
 
                 _ = self.optimize_map(num_joint_iters, idx, gt_color, gt_depth, gt_c2w,
                                       self.keyframe_dict, self.keyframe_list, cur_c2w, color_refine=color_refine)
@@ -749,6 +825,16 @@ class Mapper(object):
                     dic_of_cur_frame.update(
                         {'exposure_feat': self.exposure_feat.detach().cpu()})
                 self.keyframe_dict.append(dic_of_cur_frame)
+            else:
+                ## TODO if idx is not keyframe, update npc points keyframe pos w.r.t last keyframe
+                new_keyframe_idx = len(self.keyframe_list) - 1
+                if self.deform_points:
+                    new_keyframe_c2w = self.keyframe_dict[new_keyframe_idx]['est_c2w']
+                    self.npc.update_keyframe_pos(idx, self.keyframe_dict[new_keyframe_idx]["idx"], new_keyframe_c2w)
+
+            
+            
+            
 
             init = False
             self.prev_c2w = self.estimate_c2w_list[idx]

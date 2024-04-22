@@ -1,6 +1,7 @@
-scene: room0
+scene: room0_trial
+deform_points: True
 inherit_from: configs/Replica/replica.yaml
-config_path: configs/Replica/room0.yaml
+config_path: configs/Replica/room0_deform.yaml
 data:
   input_folder: datasets/Replica/room0_trial
   output: output/Replica/room0

@@ -4,7 +4,8 @@ from datetime import datetime
 from src import config
 from src.Point_SLAM import Point_SLAM
 from src.common import setup_seed
-
+import torch
+torch.autograd.set_detect_anomaly(True)
 
 
 def main():

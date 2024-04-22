@@ -39,7 +39,23 @@ class NeuralPointCloud(object):
                                             self.cuda_id,
                                             faiss.IndexIVFFlat(faiss.IndexFlatL2(3), 3, self.nlist, faiss.METRIC_L2))
         self.index.nprobe = cfg['pointcloud']['nprobe']
+
+        self.deform_points = cfg["deform_points"]
+        if self.deform_points:
+            self._pos_in_last_keyframe = []
+            self._last_keyframe_for_pts = []
+        
         setup_seed(cfg["setup_seed"])
+    
+    def pos_in_last_keyframe(self, index=None):
+        if index is None:
+            return self._pos_in_last_keyframe
+        return self._pos_in_last_keyframe[index]
+    
+    def last_keyframe_for_pts(self, index=None):
+        if index is None:
+            return self._last_keyframe_for_pts
+        return self._last_keyframe_for_pts[index]
 
     def cloud_pos(self, index=None):
         if index is None:
@@ -89,7 +105,7 @@ class NeuralPointCloud(object):
             self.col_feats = feats.detach().clone()
 
     def add_neural_points(self, batch_rays_o, batch_rays_d, batch_gt_depth, batch_gt_color,
-                          train=False, is_pts_grad=False, dynamic_radius=None):
+                          train=False, is_pts_grad=False, dynamic_radius=None,last_keyframe_idx =None, last_keyframe_c2w = None):
         """
         Add multiple neural points, will use depth filter when getting these samples.
 
@@ -146,6 +162,16 @@ class NeuralPointCloud(object):
 
             self._cloud_pos += pts.tolist()
             self._pts_num += pts.shape[0]
+
+            if self.deform_points:
+                homo_pts = torch.cat([pts,torch.ones(pts.shape[0],1, device=self.device)],1 )
+                last_keyframe_w2c = torch.inverse(last_keyframe_c2w)
+                pts_in_last_keyframe = torch.matmul(last_keyframe_w2c, homo_pts.T).T
+                # pts_in_last_keyframe = torch.cat([pts_in_last_keyframe, torch.ones(pts_in_last_keyframe.shape[0],1, device=self.device)],1)
+                print("pts last keyframe: ", pts_in_last_keyframe.shape, pts.shape)
+                self._pos_in_last_keyframe += pts_in_last_keyframe.tolist()
+                self._last_keyframe_for_pts += [last_keyframe_idx] * len(pts_in_last_keyframe.tolist())
+
 
             if self.geo_feats is None:
                 self.geo_feats = torch.zeros(
@@ -275,3 +301,47 @@ class NeuralPointCloud(object):
 
         invalid_mask = torch.from_numpy(invalid).to(self.device)
         return torch.from_numpy(z_vals_total).float().to(self.device), invalid_mask
+
+    def update_global_pos_for_keyframe(self,frame, c2w):
+        """
+        Update the global position of the keyframe points.
+        """
+        keyframe_idx = torch.tensor(self.last_keyframe_for_pts(), device=self.device)
+        indices = keyframe_idx == frame
+        # if no points in this keyframe, return
+        if not torch.any(indices):
+            return indices
+        keyframe_pos = torch.tensor(self.pos_in_last_keyframe(), device=self.device)
+        keyframe_pos = keyframe_pos[indices]
+        global_pos = torch.matmul(c2w, keyframe_pos.T).T[:, :3]
+        # print(global_pos.shape, keyframe_pos.shape, c2w.shape, "debugging update")
+        cloud_pos_tensor = torch.tensor(self.cloud_pos(), device=self.device)
+        cloud_pos_tensor[indices] = global_pos
+        self._cloud_pos = cloud_pos_tensor.tolist()
+        return indices
+    
+    def update_faiss_index(self, indices):
+        """
+        Update the faiss index.
+        """
+        # self.index.update_vectors(len(indices), torch.tensor(indices, device=self.device), torch.tensor(self.cloud_pos(), device=self.device)[indices])
+        self.index.reset()
+        self.index.train(torch.tensor(self.cloud_pos(), device=self.device))
+        self.index.add(torch.tensor(self.cloud_pos(), device=self.device))
+        return 
+
+    def update_keyframe_pos(self, frame, new_frame, c2w):
+        """
+        Update the keyframe position of certain points
+        """
+        keyframe_idx = torch.tensor(self.last_keyframe_for_pts(), device=self.device)
+        indices = keyframe_idx == frame
+        keyframe_pos = torch.tensor(self.pos_in_last_keyframe(), device=self.device)
+        indices_pos = keyframe_pos[indices]
+        w2c = torch.inverse(c2w)
+        new_pos = torch.matmul(w2c, indices_pos.T).T
+        keyframe_pos[indices] = new_pos
+        self._pos_in_last_keyframe = keyframe_pos.tolist()
+        keyframe_idx[indices] = new_frame
+        self._last_keyframe_for_pts = keyframe_idx.tolist()
+        return

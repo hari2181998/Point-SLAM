@@ -205,13 +205,14 @@ class Tracker(object):
         device = self.device
         self.c = {}
         scene_name = self.cfg['scene']
+        deform_points = self.cfg['deform_points']
 
         if self.use_dynamic_radius:
             os.makedirs(f'{self.output}/dynamic_r_frame', exist_ok=True)
         if self.wandb and not self.gt_camera:
             wandb.init(project=self.cfg['project_name'],
-                       group=f'slam_{scene_name}',
-                       name='tracker_'+time_string,
+                       group=f'slam_{scene_name}_{deform_points}',
+                       name='tracker_'+time_string + '_'+ str(deform_points),
                        dir=self.cfg["wandb_folder"], tags=[scene_name])
 
         if self.verbose:

@@ -24,7 +24,8 @@ class Renderer(object):
                     npc_geo_feats=None, npc_col_feats=None,
                     is_tracker=False, cloud_pos=None,
                     pts_views_d=None, ray_pts_num=None,
-                    dynamic_r_query=None, exposure_feat=None):
+                    dynamic_r_query=None, exposure_feat=None,
+                    last_key_frame_pos=None,last_key_frame_idx=None, c2w_list=None):
         """
         Evaluates the occupancy and/or color value for the points.
 
@@ -59,7 +60,7 @@ class Renderer(object):
             pi = pi.unsqueeze(0)
             ret, valid_ray_mask, point_mask = decoders(pi, npc, stage, npc_geo_feats, npc_col_feats,
                                                        ray_pts_num, is_tracker, cloud_pos, pts_views_d,
-                                                       dynamic_r_query, exposure_feat)
+                                                       dynamic_r_query, exposure_feat,last_key_frame_pos,last_key_frame_idx, c2w_list)
             ret = ret.squeeze(0)
             if len(ret.shape) == 1 and ret.shape[0] == 4:
                 ret = ret.unsqueeze(0)
@@ -76,7 +77,8 @@ class Renderer(object):
 
     def render_batch_ray(self, npc, decoders, rays_d, rays_o, device, stage, gt_depth=None,
                          npc_geo_feats=None, npc_col_feats=None, is_tracker=False, cloud_pos=None,
-                         dynamic_r_query=None, exposure_feat=None):
+                         dynamic_r_query=None, exposure_feat=None,
+                         last_key_frame_pos=None,last_key_frame_idx=None, c2w_list = None):
         """
         Render color, depth, uncertainty and a valid ray mask from a batch of rays.
 
@@ -184,7 +186,8 @@ class Renderer(object):
             pointsf, decoders, npc, stage, device, npc_geo_feats,
             npc_col_feats, is_tracker, cloud_pos, rays_d_pts,
             ray_pts_num=ray_pts_num, dynamic_r_query=dynamic_r_query,
-            exposure_feat=exposure_feat)
+            exposure_feat=exposure_feat, last_key_frame_pos=last_key_frame_pos,
+            last_key_frame_idx=last_key_frame_idx, c2w_list=c2w_list)
 
         with torch.no_grad():
             raw[torch.nonzero(~point_mask).flatten(), -1] = - 100.0

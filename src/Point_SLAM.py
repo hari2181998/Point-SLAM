@@ -98,10 +98,15 @@ class Point_SLAM():
         else:
             self.npc = NeuralPointCloud(cfg)
 
+        # Changes for deform points
+        self.deform_points = cfg["deform_points"]
+
         self.renderer = Renderer(cfg, args, self)
         self.mapper = Mapper(cfg, args, self)
         self.tracker = Tracker(cfg, args, self)
         self.print_output_desc()
+
+        
 
     def print_output_desc(self):
         print("")

@@ -10,7 +10,7 @@ tracking:
 mapping:
   color_refine: True
   ckpt_freq: 1000
-  keyframe_every: 20
+  keyframe_every: 1
   mapping_window_size: 12
   pixels: 5000
   pixels_based_on_color_grad: 1000
