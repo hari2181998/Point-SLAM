@@ -141,6 +141,7 @@ class MLP_geometry(nn.Module):
         # faiss returns "D" in the form of squared distances. Thus we compare D to the squared radius
         radius_query_bound = npc.get_radius_query(
         )**2 if not self.use_dynamic_radius else dynamic_r_query.reshape(-1, 1)**2
+        last_keyframe_pos = None
         if is_tracker:
             # re-calculate D to propagate gradients to the camera extrinsics
             nn_num = D.shape[1]
@@ -361,6 +362,7 @@ class MLP_color(nn.Module):
         # faiss returns "D" in the form of squared distances. Thus we compare D to the squared radius
         radius_query_bound = npc.get_radius_query(
         )**2 if not self.use_dynamic_radius else dynamic_r_query.reshape(-1, 1)**2
+        last_keyframe_pos = None
         if is_tracker:
             # re-calculate D to propagate gradients to the camera extrinsics
             nn_num = D.shape[1]

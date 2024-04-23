@@ -439,11 +439,11 @@ class Mapper(object):
         # if self.deform_points and self.BA:
         #     ba_c2w_list = torch.tensor(self.estimate_c2w_list, device=device)
         
-        estimate_c2w_list = self.estimate_c2w_list.clone().to(device)
-        estimate_c2w_list.requires_grad = False
-        # ba_c2w_list = estimate_c2w_list.clone()
+        # estimate_c2w_list = self.estimate_c2w_list.clone().to(device)
+        # estimate_c2w_list.requires_grad = False
+        # # ba_c2w_list = estimate_c2w_list.clone()
 
-        #debugging 
+        # #debugging 
         grad_through_camera_tensors = []
 
         for joint_iter in range(num_joint_iters):
@@ -497,7 +497,7 @@ class Mapper(object):
             # match with the per frame exposure feature
 
             camera_tensor_id = 0
-            ba_c2w_list = V(estimate_c2w_list)
+            # ba_c2w_list = V(estimate_c2w_list)
             for frame in optimize_frame:
                 if frame != -1:
                     gt_depth = keyframe_dict[frame]['depth'].to(device)
@@ -506,7 +506,7 @@ class Mapper(object):
                         camera_tensor = camera_tensor_list[camera_tensor_id]
                         camera_tensor_id += 1
                         c2w = get_camera_from_tensor(camera_tensor)
-                        ba_c2w_list[keyframe_dict[frame]['idx']] = torch.cat([get_camera_from_tensor(camera_tensor), bottom], dim=0)
+                        # ba_c2w_list[keyframe_dict[frame]['idx']] = torch.cat([get_camera_from_tensor(camera_tensor), bottom], dim=0)
                     else:
                         c2w = keyframe_dict[frame]['est_c2w']
 
@@ -516,7 +516,7 @@ class Mapper(object):
                     if self.BA:
                         camera_tensor = camera_tensor_list[camera_tensor_id]
                         c2w = get_camera_from_tensor(camera_tensor)
-                        ba_c2w_list[idx] = torch.cat([get_camera_from_tensor(camera_tensor), bottom], dim=0)
+                        # ba_c2w_list[idx] = torch.cat([get_camera_from_tensor(camera_tensor), bottom], dim=0)
                     else:
                         c2w = cur_c2w
 
@@ -570,7 +570,7 @@ class Mapper(object):
                                                  exposure_feat=None,
                                                  last_key_frame_pos = self.cloud_pos_in_last_keyframe_tensor,
                                                  last_key_frame_idx = self.last_keyframe_idx_tensor,
-                                                 c2w_list = ba_c2w_list if self.BA else None)
+                                                 c2w_list = None)
                 
             depth, uncertainty, color, valid_ray_mask = ret
 
@@ -611,10 +611,11 @@ class Mapper(object):
                 for camera_tensor in camera_tensor_list:
                     camera_tensor_grad += camera_tensor.grad.norm()
                 camera_tensor_grad /= len(camera_tensor_list)
-                wandb.log({'camera_tensor_grad': camera_tensor_grad.item()})
+                grad_through_camera_tensors.append(camera_tensor_grad.item())
+                # wandb.log({'camera_tensor_grad': camera_tensor_grad.item()})
             optimizer.step()
             optimizer.zero_grad()
-            ba_c2w_list.grad = None
+            # ba_c2w_list.grad = None
 
             # put selected and updated params back to npc
             if self.frustum_feature_selection:
@@ -645,12 +646,12 @@ class Mapper(object):
                         wandb.log({'idx_map': int(idx.item()), 'time': float(f'{toc - tic:0.6f}'),
                                    'geo_loss_pixel': float(f'{(geo_loss.item()/depth_mask.sum().item()):0.6f}'),
                                    'color_loss_pixel': float(f'{(color_loss.item()/depth_mask.sum().item()):0.6f}'),
-                                   'pts_total': self.npc.index_ntotal()})
+                                   'pts_total': self.npc.index_ntotal(), 'camera_tensor_grad': torch.tensor(grad_through_camera_tensors).mean()})
                     else:
                         wandb.log({'idx': int(idx.item()), 'time': float(f'{toc - tic:0.6f}'),
                                    'geo_loss_pixel': float(f'{(geo_loss.item()/depth_mask.sum().item()):0.6f}'),
                                    'color_loss_pixel': float(f'{(color_loss.item()/depth_mask.sum().item()):0.6f}'),
-                                   'pts_total': self.npc.index_ntotal()})
+                                   'pts_total': self.npc.index_ntotal(), 'camera_tensor_grad': torch.tensor(grad_through_camera_tensors).mean()})
 
                     wandb.log({'idx_map': int(idx.item()),
                                'num_joint_iters': num_joint_iters})
@@ -806,7 +807,7 @@ class Mapper(object):
             for outer_joint_iter in range(outer_joint_iters):
                 # start BA when having enough keyframes
                 self.BA = (len(self.keyframe_list) >
-                           1) and cfg['mapping']['BA']
+                           4) and cfg['mapping']['BA']
 
                 _ = self.optimize_map(num_joint_iters, idx, gt_color, gt_depth, gt_c2w,
                                       self.keyframe_dict, self.keyframe_list, cur_c2w, color_refine=color_refine)
