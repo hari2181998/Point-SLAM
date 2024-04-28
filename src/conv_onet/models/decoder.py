@@ -5,6 +5,50 @@ import torch.nn.functional as F
 import torch.nn.init as init
 import time
 
+def quad2rotation(quad):
+    """
+    Convert quaternion to rotation in batch. Since all operation in pytorch, support gradient passing.
+
+    Args:
+        quad (tensor, batch_size*4): quaternion.
+
+    Returns:
+        rot_mat (tensor, batch_size*3*3): rotation.
+    """
+    bs = quad.shape[0]
+    qr, qi, qj, qk = quad[:, 0], quad[:, 1], quad[:, 2], quad[:, 3]
+    two_s = 2.0 / (quad * quad).sum(-1)
+    rot_mat = torch.zeros(bs, 3, 3).to(quad.get_device())
+    rot_mat[:, 0, 0] = 1 - two_s * (qj ** 2 + qk ** 2)
+    rot_mat[:, 0, 1] = two_s * (qi * qj - qk * qr)
+    rot_mat[:, 0, 2] = two_s * (qi * qk + qj * qr)
+    rot_mat[:, 1, 0] = two_s * (qi * qj + qk * qr)
+    rot_mat[:, 1, 1] = 1 - two_s * (qi ** 2 + qk ** 2)
+    rot_mat[:, 1, 2] = two_s * (qj * qk - qi * qr)
+    rot_mat[:, 2, 0] = two_s * (qi * qk - qj * qr)
+    rot_mat[:, 2, 1] = two_s * (qj * qk + qi * qr)
+    rot_mat[:, 2, 2] = 1 - two_s * (qi ** 2 + qj ** 2)
+    return rot_mat
+
+
+def get_camera_from_tensor(inputs):
+    """
+    Convert quaternion and translation to transformation matrix.
+
+    Returns:
+        tensor(N*3*4 if batch input or 3*4): Transformation matrix.
+
+    """
+    N = len(inputs.shape)
+    if N == 1:
+        inputs = inputs.unsqueeze(0)
+    quad, T = inputs[:, :4], inputs[:, 4:]
+    R = quad2rotation(quad)
+    RT = torch.cat([R, T[:, :, None]], 2)
+    if N == 1:
+        RT = RT[0]
+    return RT
+
 
 class GaussianFourierFeatureTransform(torch.nn.Module):
     """
@@ -129,7 +173,8 @@ class MLP_geometry(nn.Module):
         self.sample_mode = sample_mode
 
     def get_feature_at_pos(self, npc, p, npc_feats, is_tracker=False, cloud_pos=None,
-                           dynamic_r_query=None, last_keyframe_pos=None, last_keyframe_idx=None, c2w_list=None):
+                           dynamic_r_query=None, last_keyframe_pos=None, last_keyframe_idx=None, camera_tensor_list=None,
+                           optimize_frame_list=None):
         assert torch.is_tensor(
             p), 'point locations for get_feature_at_pos should be tensor.'
         device = p.device
@@ -141,21 +186,21 @@ class MLP_geometry(nn.Module):
         # faiss returns "D" in the form of squared distances. Thus we compare D to the squared radius
         radius_query_bound = npc.get_radius_query(
         )**2 if not self.use_dynamic_radius else dynamic_r_query.reshape(-1, 1)**2
-        last_keyframe_pos = None
+        # last_keyframe_pos = None
         if is_tracker:
             # re-calculate D to propagate gradients to the camera extrinsics
             nn_num = D.shape[1]
             if last_keyframe_pos is not None:
-                # (N, n_num, 4,4) * (N, n_num, 4) -> (N, n_num, 4)
-                tf = c2w_list[last_keyframe_idx[I]] #(N, n_num, 4, 4)
-                pos = last_keyframe_pos[I] #(N, n_num, 4)
-                world_pos = torch.einsum('ijkl,ijl->ijk', tf, pos)[:, :, :3]
-                D = torch.sum(torch.square(
-                    world_pos-p.reshape(-1, 1, 3)), dim=-1)
-                # print("D has been calculated")
-            else:
-                D = torch.sum(torch.square(
-                    cloud_pos[I]-p.reshape(-1, 1, 3)), dim=-1)
+                for i in range(len(optimize_frame_list)):
+                    idx = optimize_frame_list[i]
+                    tf = get_camera_from_tensor(camera_tensor_list[i])
+                    # print(cloud_pos.shape, last_keyframe_pos.shape, torch.einsum('ij,kj->ki', tf, last_keyframe_pos)[:,:3].shape,
+                        #   last_keyframe_idx.shape, (last_keyframe_idx==idx).shape)
+                    cloud_pos = torch.where(last_keyframe_idx.unsqueeze(1) ==idx, torch.einsum('ij,kj->ki', tf, last_keyframe_pos)[:,:3], cloud_pos)
+                
+               
+            D = torch.sum(torch.square(
+                cloud_pos[I]-p.reshape(-1, 1, 3)), dim=-1)
             D = D.reshape(-1, nn_num)
 
         has_neighbors = neighbor_num > self.min_nn_num-1
@@ -184,7 +229,8 @@ class MLP_geometry(nn.Module):
         return c, has_neighbors  # (N_point,c_dim), mask for pts
 
     def forward(self, p, npc, npc_geo_feats, pts_num=16, is_tracker=False, cloud_pos=None,
-                pts_views_d=None, dynamic_r_query=None, last_keyframe_pos=None, last_keyframe_idx=None, c2w_list=None):
+                pts_views_d=None, dynamic_r_query=None, last_keyframe_pos=None, last_keyframe_idx=None, camera_tensor_list=None,
+                optimize_frame_list=None):
         """forward method of geometric decoder.
 
         Args:
@@ -205,7 +251,8 @@ class MLP_geometry(nn.Module):
 
         c, has_neighbors = self.get_feature_at_pos(
             npc, p, npc_geo_feats, is_tracker, cloud_pos, dynamic_r_query=dynamic_r_query,
-            last_keyframe_pos=last_keyframe_pos, last_keyframe_idx=last_keyframe_idx, c2w_list=c2w_list)  # get (N,c_dim), e.g. (N,32)
+            last_keyframe_pos=last_keyframe_pos, last_keyframe_idx=last_keyframe_idx, camera_tensor_list=camera_tensor_list,
+            optimize_frame_list=optimize_frame_list)  # get (N,c_dim), e.g. (N,32)
 
         # ray is not close to the current npc, choose bar here
         # a ray is considered valid if at least half of all points along the ray have neighbors.
@@ -351,7 +398,8 @@ class MLP_color(nn.Module):
         self.sample_mode = sample_mode
 
     def get_feature_at_pos(self, npc, p, npc_feats, is_tracker=False, cloud_pos=None,
-                           dynamic_r_query=None, last_keyframe_pos=None, last_keyframe_idx=None, c2w_list=None):
+                           dynamic_r_query=None, last_keyframe_pos=None, last_keyframe_idx=None, camera_tensor_list=None,
+                           optimize_frame_list=None):
         assert torch.is_tensor(
             p), 'point locations for get_feature_at_pos should be tensor.'
         device = p.device
@@ -362,27 +410,19 @@ class MLP_color(nn.Module):
         # faiss returns "D" in the form of squared distances. Thus we compare D to the squared radius
         radius_query_bound = npc.get_radius_query(
         )**2 if not self.use_dynamic_radius else dynamic_r_query.reshape(-1, 1)**2
-        last_keyframe_pos = None
+        # last_keyframe_pos = None
         if is_tracker:
-            # re-calculate D to propagate gradients to the camera extrinsics
+             # re-calculate D to propagate gradients to the camera extrinsics
             nn_num = D.shape[1]
             if last_keyframe_pos is not None:
-                # start_time = time.perf_counter()
-                # (N, n_num, 3,4) * (N, n_num, 4) -> (N, n_num, 3)
-                tf = c2w_list[last_keyframe_idx[I]] #(N, n_num, 4, 4)
-                pos = last_keyframe_pos[I] #(N, n_num, 4)
-                world_pos = torch.einsum('ijkl,ijl->ijk', tf, pos)[:, :, :3]
-                D = torch.sum(torch.square(
-                    world_pos-p.reshape(-1, 1, 3)), dim=-1)
-                # end_time = time.perf_counter()
-                # print(f"Time taken to calculate D: {end_time-start_time}")
-                # print("D has been calculated")
-            else:
-                # start_time = time.perf_counter()
-                D = torch.sum(torch.square(
-                    cloud_pos[I]-p.reshape(-1, 1, 3)), dim=-1)
-                # end_time = time.perf_counter()
-                # print(f"Time taken to calculate D: {end_time-start_time}")
+                for i in range(len(optimize_frame_list)):
+                    idx = optimize_frame_list[i]
+                    tf = get_camera_from_tensor(camera_tensor_list[i])
+                    cloud_pos = torch.where(last_keyframe_idx.unsqueeze(1) ==idx, torch.einsum('ij,kj->ki', tf, last_keyframe_pos)[:,:3], cloud_pos)
+                
+               
+            D = torch.sum(torch.square(
+                cloud_pos[I]-p.reshape(-1, 1, 3)), dim=-1)
             D = D.reshape(-1, nn_num)
 
         has_neighbors = neighbor_num > self.min_nn_num-1
@@ -418,7 +458,7 @@ class MLP_color(nn.Module):
         return c, has_neighbors  # (N_point,c_dim), mask for pts
 
     def forward(self, p, npc, npc_col_feats, is_tracker=False, cloud_pos=None, pts_views_d=None, dynamic_r_query=None, exposure_feat=None,
-                last_keyframe_pos=None, last_keyframe_idx=None, c2w_list=None):
+                last_keyframe_pos=None, last_keyframe_idx=None, camera_tensor_list=None, optimize_frame_list=None):
         """forwad method of decoder.
 
         Args:
@@ -437,7 +477,8 @@ class MLP_color(nn.Module):
         """
         c, _ = self.get_feature_at_pos(
             npc, p, npc_col_feats, is_tracker, cloud_pos, dynamic_r_query=dynamic_r_query,
-            last_keyframe_pos=last_keyframe_pos, last_keyframe_idx=last_keyframe_idx, c2w_list=c2w_list)
+            last_keyframe_pos=last_keyframe_pos, last_keyframe_idx=last_keyframe_idx, camera_tensor_list=camera_tensor_list,
+            optimize_frame_list=optimize_frame_list) 
         p = p.float().reshape(1, -1, 3)
 
         embedded_pts = self.embedder(p)
@@ -505,7 +546,8 @@ class POINT(nn.Module):
 
     def forward(self, p, npc, stage, npc_geo_feats, npc_col_feats, pts_num=16, is_tracker=False, cloud_pos=None,
                 pts_views_d=None, dynamic_r_query=None, exposure_feat=None,
-                last_keyframe_pos=None, last_keyframe_idx=None, c2w_list=None):
+                last_keyframe_pos=None, last_keyframe_idx=None, camera_tensor_list=None,
+                optimize_frame_list=None):
         """
             Output occupancy/color and associated masks for validity
 
@@ -535,7 +577,8 @@ class POINT(nn.Module):
                                                                  dynamic_r_query=dynamic_r_query,
                                                                  last_keyframe_pos=last_keyframe_pos,
                                                                  last_keyframe_idx=last_keyframe_idx,
-                                                                 c2w_list=c2w_list)
+                                                                 camera_tensor_list=camera_tensor_list,
+                                                                 optimize_frame_list=optimize_frame_list)
                 raw = torch.zeros(
                     geo_occ.shape[0], 4, device=device, dtype=torch.float)
                 raw[..., -1] = geo_occ
@@ -546,11 +589,14 @@ class POINT(nn.Module):
                                                                  dynamic_r_query=dynamic_r_query,
                                                                  last_keyframe_pos=last_keyframe_pos,
                                                                  last_keyframe_idx=last_keyframe_idx,
-                                                                 c2w_list=c2w_list)
+                                                                 camera_tensor_list=camera_tensor_list,
+                                                                 optimize_frame_list=optimize_frame_list)
                 raw = self.color_decoder(p, npc, npc_col_feats,                                # returned (N,4)
                                          is_tracker=is_tracker, cloud_pos=cloud_pos,
                                          pts_views_d=pts_views_d,
                                          dynamic_r_query=dynamic_r_query, exposure_feat=exposure_feat,
-                                         last_keyframe_pos=last_keyframe_pos,last_keyframe_idx=last_keyframe_idx,c2w_list=c2w_list)
+                                         last_keyframe_pos=last_keyframe_pos,last_keyframe_idx=last_keyframe_idx,
+                                         camera_tensor_list=camera_tensor_list,
+                                         optimize_frame_list=optimize_frame_list)
                 raw = torch.cat([raw, geo_occ.unsqueeze(-1)], dim=-1)
                 return raw, ray_mask, point_mask

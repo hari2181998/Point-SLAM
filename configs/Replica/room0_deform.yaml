@@ -1,4 +1,4 @@
-scene: room0_trial
+scene: room0_trial_points_w_grad_after_error_debug
 deform_points: True
 inherit_from: configs/Replica/replica.yaml
 config_path: configs/Replica/room0_deform.yaml

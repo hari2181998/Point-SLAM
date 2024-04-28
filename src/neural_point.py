@@ -302,17 +302,17 @@ class NeuralPointCloud(object):
         invalid_mask = torch.from_numpy(invalid).to(self.device)
         return torch.from_numpy(z_vals_total).float().to(self.device), invalid_mask
 
-    def update_global_pos_for_keyframe(self,frame, c2w):
+    def update_global_pos_for_keyframe(self,frame, c2w, last_keyframe_idx, last_keyframe_pos):
         """
         Update the global position of the keyframe points.
         """
-        keyframe_idx = torch.tensor(self.last_keyframe_for_pts(), device=self.device)
-        indices = keyframe_idx == frame
+
+        indices = last_keyframe_idx == frame
         # if no points in this keyframe, return
         if not torch.any(indices):
             return indices
-        keyframe_pos = torch.tensor(self.pos_in_last_keyframe(), device=self.device)
-        keyframe_pos = keyframe_pos[indices]
+        
+        keyframe_pos = last_keyframe_pos[indices]
         global_pos = torch.matmul(c2w, keyframe_pos.T).T[:, :3]
         # print(global_pos.shape, keyframe_pos.shape, c2w.shape, "debugging update")
         cloud_pos_tensor = torch.tensor(self.cloud_pos(), device=self.device)
@@ -330,18 +330,18 @@ class NeuralPointCloud(object):
         self.index.add(torch.tensor(self.cloud_pos(), device=self.device))
         return 
 
-    def update_keyframe_pos(self, frame, new_frame, c2w):
+    def update_keyframe_pos(self, frame, new_frame, c2w, last_keyframe_idx, last_keyframe_pos):
         """
         Update the keyframe position of certain points
         """
-        keyframe_idx = torch.tensor(self.last_keyframe_for_pts(), device=self.device)
-        indices = keyframe_idx == frame
-        keyframe_pos = torch.tensor(self.pos_in_last_keyframe(), device=self.device)
-        indices_pos = keyframe_pos[indices]
+    
+        indices = last_keyframe_idx == frame
+        # keyframe_pos = torch.tensor(self.pos_in_last_keyframe(), device=self.device)
+        indices_pos = last_keyframe_pos[indices]
         w2c = torch.inverse(c2w)
         new_pos = torch.matmul(w2c, indices_pos.T).T
-        keyframe_pos[indices] = new_pos
-        self._pos_in_last_keyframe = keyframe_pos.tolist()
-        keyframe_idx[indices] = new_frame
-        self._last_keyframe_for_pts = keyframe_idx.tolist()
+        last_keyframe_pos[indices] = new_pos
+        self._pos_in_last_keyframe = last_keyframe_pos.tolist()
+        last_keyframe_idx[indices] = new_frame
+        self._last_keyframe_for_pts = last_keyframe_idx.tolist()
         return

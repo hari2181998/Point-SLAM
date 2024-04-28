@@ -400,19 +400,23 @@ class Mapper(object):
         if self.BA:
             camera_tensor_list = []
             gt_camera_tensor_list = []
+            optimize_frame_list = []
             for frame in optimize_frame:
                 # the oldest frame should be fixed to avoid drifting
                 if frame != oldest_frame:
                     if frame != -1:
                         c2w = keyframe_dict[frame]['est_c2w']
                         gt_c2w = keyframe_dict[frame]['gt_c2w']
+                        frame_idx = keyframe_dict[frame]["idx"]
                     else:
                         c2w = cur_c2w
                         gt_c2w = gt_cur_c2w
+                        frame_idx = idx
                     camera_tensor = get_tensor_from_camera(c2w)
                     camera_tensor = Variable(
                         camera_tensor.to(device), requires_grad=True)
                     camera_tensor_list.append(camera_tensor)
+                    optimize_frame_list.append(frame_idx)
                     gt_camera_tensor = get_tensor_from_camera(gt_c2w)
                     gt_camera_tensor_list.append(gt_camera_tensor)
         
@@ -506,6 +510,7 @@ class Mapper(object):
                         camera_tensor = camera_tensor_list[camera_tensor_id]
                         camera_tensor_id += 1
                         c2w = get_camera_from_tensor(camera_tensor)
+                        # c2w = keyframe_dict[frame]['est_c2w']
                         # ba_c2w_list[keyframe_dict[frame]['idx']] = torch.cat([get_camera_from_tensor(camera_tensor), bottom], dim=0)
                     else:
                         c2w = keyframe_dict[frame]['est_c2w']
@@ -516,6 +521,7 @@ class Mapper(object):
                     if self.BA:
                         camera_tensor = camera_tensor_list[camera_tensor_id]
                         c2w = get_camera_from_tensor(camera_tensor)
+                        # c2w = cur_c2w
                         # ba_c2w_list[idx] = torch.cat([get_camera_from_tensor(camera_tensor), bottom], dim=0)
                     else:
                         c2w = cur_c2w
@@ -570,7 +576,8 @@ class Mapper(object):
                                                  exposure_feat=None,
                                                  last_key_frame_pos = self.cloud_pos_in_last_keyframe_tensor,
                                                  last_key_frame_idx = self.last_keyframe_idx_tensor,
-                                                 c2w_list = None)
+                                                 camera_tensor_list = camera_tensor_list if self.BA else None,
+                                                 optimize_frame_list = optimize_frame_list if self.BA else None)
                 
             depth, uncertainty, color, valid_ray_mask = ret
 
@@ -701,9 +708,11 @@ class Mapper(object):
             for frame in optimize_frame:
                 if frame != oldest_frame:
                     if frame != -1:
-                        indices = self.npc.update_global_pos_for_keyframe(frame, keyframe_dict[frame]['est_c2w'].detach().clone())
+                        indices = self.npc.update_global_pos_for_keyframe(keyframe_dict[frame]["idx"], keyframe_dict[frame]['est_c2w'].detach().clone(),
+                                                                          self.last_keyframe_idx_tensor, self.cloud_pos_in_last_keyframe_tensor)
                     else:
-                        indices = self.npc.update_global_pos_for_keyframe(idx, cur_c2w.detach().clone())
+                        indices = self.npc.update_global_pos_for_keyframe(idx, cur_c2w.detach().clone(), self.last_keyframe_idx_tensor, 
+                                                                          self.cloud_pos_in_last_keyframe_tensor)
                     final_indices += indices.tolist()
                     
                     
@@ -831,7 +840,8 @@ class Mapper(object):
                 new_keyframe_idx = len(self.keyframe_list) - 1
                 if self.deform_points:
                     new_keyframe_c2w = self.keyframe_dict[new_keyframe_idx]['est_c2w']
-                    self.npc.update_keyframe_pos(idx, self.keyframe_dict[new_keyframe_idx]["idx"], new_keyframe_c2w)
+                    self.npc.update_keyframe_pos(idx, self.keyframe_dict[new_keyframe_idx]["idx"], new_keyframe_c2w, 
+                                                 self.last_keyframe_idx_tensor, self.cloud_pos_in_last_keyframe_tensor)
 
             
             
