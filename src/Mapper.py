@@ -703,20 +703,35 @@ class Mapper(object):
                        f'{self.output}/ckpts/color_decoder/{idx:05}.pt')
             
         ##TODO Update the point global positions based on the optimized R,t and update the faiss index
+        # if self.deform_points and self.BA:
+        #     for frame in optimize_frame:
+        #         if frame != oldest_frame:
+        #             if frame != -1:
+        #                 self.npc.update_global_pos_for_keyframe(keyframe_dict[frame]["idx"], keyframe_dict[frame]['est_c2w'].detach().clone(),
+        #                                                                   self.last_keyframe_idx_tensor, self.cloud_pos_in_last_keyframe_tensor)
+        #             else:
+        #                 self.npc.update_global_pos_for_keyframe(idx, cur_c2w.detach().clone(), self.last_keyframe_idx_tensor, 
+        #                                                                   self.cloud_pos_in_last_keyframe_tensor)
+        
+        ## New method for updating -> Mostly better in terms of computation than the above method
         if self.deform_points and self.BA:
-            final_indices = []
+            i = 0
             for frame in optimize_frame:
-                if frame != oldest_frame:
-                    if frame != -1:
-                        indices = self.npc.update_global_pos_for_keyframe(keyframe_dict[frame]["idx"], keyframe_dict[frame]['est_c2w'].detach().clone(),
-                                                                          self.last_keyframe_idx_tensor, self.cloud_pos_in_last_keyframe_tensor)
-                    else:
-                        indices = self.npc.update_global_pos_for_keyframe(idx, cur_c2w.detach().clone(), self.last_keyframe_idx_tensor, 
-                                                                          self.cloud_pos_in_last_keyframe_tensor)
-                    final_indices += indices.tolist()
+                if frame == oldest_frame:
+                    continue
+                index = optimize_frame_list[i]
+                i+=1
+                if frame != -1:
+                    tf = torch.inverse(keyframe_dict[frame]['est_c2w'].detach().clone())
+                    self.cloud_pos_tensor = torch.where(self.last_keyframe_idx_tensor.unsqueeze(1) == index, 
+                                                        torch.einsum('ij,bj->bi', tf,self.cloud_pos_in_last_keyframe_tensor)[:,:3], self.cloud_pos_tensor)
+                else:
+                    tf = torch.inverse(cur_c2w.detach().clone())
+                    self.cloud_pos_tensor = torch.where(self.last_keyframe_idx_tensor.unsqueeze(1) == index, 
+                                                        torch.einsum('ij,bj->bi', tf,self.cloud_pos_in_last_keyframe_tensor)[:,:3], self.cloud_pos_tensor)
+            self.npc.update_global_pos(self.cloud_pos_tensor)
                     
-                    
-            self.npc.update_faiss_index(final_indices)
+            self.npc.update_faiss_index()
             print('Mapper has updated point global positions and faiss index.')
 
         if self.BA:
@@ -729,6 +744,7 @@ class Mapper(object):
         setup_seed(cfg["setup_seed"])
         scene_name = cfg["scene"]
         deform_points = cfg["deform_points"]
+        run_name = cfg["run_name"]
 
         if self.use_dynamic_radius:
             os.makedirs(f'{self.output}/dynamic_r_frame', exist_ok=True)
@@ -736,7 +752,7 @@ class Mapper(object):
             os.makedirs(f"{self.output}/ckpts/color_decoder", exist_ok=True)
         if self.wandb:
             wandb.init(config=cfg, project=self.project_name, group=f'slam_{scene_name}_{deform_points}',
-                       name='mapper_'+time_string+ '_'+str(deform_points),
+                       name='mapper_'+time_string+ '_'+ run_name,
                        settings=wandb.Settings(code_dir="."), dir=self.cfg["wandb_folder"],
                        tags=[scene_name])
             wandb.run.log_code(".")
@@ -841,7 +857,8 @@ class Mapper(object):
                 if self.deform_points:
                     new_keyframe_c2w = self.keyframe_dict[new_keyframe_idx]['est_c2w']
                     self.npc.update_keyframe_pos(idx, self.keyframe_dict[new_keyframe_idx]["idx"], new_keyframe_c2w, 
-                                                 self.last_keyframe_idx_tensor, self.cloud_pos_in_last_keyframe_tensor)
+                                                 self.last_keyframe_idx_tensor, self.cloud_pos_tensor,
+                                                 self.cloud_pos_in_last_keyframe_tensor)
 
             
             

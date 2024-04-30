@@ -157,7 +157,9 @@ class NeuralPointCloud(object):
 
             pts = batch_rays_o[..., None, :] + \
                 batch_rays_d[..., None, :] * z_vals[..., :, None]
+            print("pts shape before masking: ", pts.shape)
             pts = pts[mask]  # use mask from pts_gt for auxiliary points
+            print("pts shape after masking: ", pts.shape)
             pts = pts.reshape(-1, 3)
 
             self._cloud_pos += pts.tolist()
@@ -319,8 +321,12 @@ class NeuralPointCloud(object):
         cloud_pos_tensor[indices] = global_pos
         self._cloud_pos = cloud_pos_tensor.tolist()
         return indices
+
+    def update_global_pos(self, cloud_pos):
+        self._cloud_pos = cloud_pos.tolist()
+        return
     
-    def update_faiss_index(self, indices):
+    def update_faiss_index(self):
         """
         Update the faiss index.
         """
@@ -330,18 +336,31 @@ class NeuralPointCloud(object):
         self.index.add(torch.tensor(self.cloud_pos(), device=self.device))
         return 
 
-    def update_keyframe_pos(self, frame, new_frame, c2w, last_keyframe_idx, last_keyframe_pos):
+    def update_keyframe_pos(self, frame, new_frame, c2w, last_keyframe_idx, cloud_pos, last_keyframe_pos):
         """
         Update the keyframe position of certain points
         """
     
-        indices = last_keyframe_idx == frame
-        # keyframe_pos = torch.tensor(self.pos_in_last_keyframe(), device=self.device)
-        indices_pos = last_keyframe_pos[indices]
+        # indices = last_keyframe_idx == frame
+        # # keyframe_pos = torch.tensor(self.pos_in_last_keyframe(), device=self.device)
+        # indices_pos = last_keyframe_pos[indices]
+        # w2c = torch.inverse(c2w)
+        # new_pos = torch.matmul(w2c, indices_pos.T).T
+        # last_keyframe_pos[indices] = new_pos
+        # self._pos_in_last_keyframe = last_keyframe_pos.tolist()
+        # last_keyframe_idx[indices] = new_frame
+        # self._last_keyframe_for_pts = last_keyframe_idx.tolist()
+
         w2c = torch.inverse(c2w)
-        new_pos = torch.matmul(w2c, indices_pos.T).T
-        last_keyframe_pos[indices] = new_pos
+        # print("homo cloud")
+        homo_cloud_pos = torch.cat([cloud_pos, torch.ones(cloud_pos.shape[0],1,device=cloud_pos.device)], dim=1)
+        last_keyframe_pos = last_keyframe_pos.to(cloud_pos.device)
+        last_keyframe_idx = last_keyframe_idx.to(cloud_pos.device)
+        w2c = w2c.to(cloud_pos.device)
+        # print(homo_cloud_pos.shape)
+        last_keyframe_pos = torch.where(last_keyframe_idx.unsqueeze(1).to(cloud_pos.device)==frame, torch.einsum('ij,kj->ki',w2c, homo_cloud_pos), last_keyframe_pos)
+        # print(last_keyframe_pos.shape)
+        last_keyframe_idx = torch.where(last_keyframe_idx == frame, new_frame.to(cloud_pos.device), last_keyframe_idx)
         self._pos_in_last_keyframe = last_keyframe_pos.tolist()
-        last_keyframe_idx[indices] = new_frame
         self._last_keyframe_for_pts = last_keyframe_idx.tolist()
         return
